@@ -1,5 +1,6 @@
 var namespace_n_a_t_s_1_1_client =
 [
+    [ "Rx", "namespace_n_a_t_s_1_1_client_1_1_rx.html", "namespace_n_a_t_s_1_1_client_1_1_rx" ],
     [ "AsyncSubscription", "class_n_a_t_s_1_1_client_1_1_async_subscription.html", "class_n_a_t_s_1_1_client_1_1_async_subscription" ],
     [ "Connection", "class_n_a_t_s_1_1_client_1_1_connection.html", "class_n_a_t_s_1_1_client_1_1_connection" ],
     [ "ConnectionFactory", "class_n_a_t_s_1_1_client_1_1_connection_factory.html", "class_n_a_t_s_1_1_client_1_1_connection_factory" ],

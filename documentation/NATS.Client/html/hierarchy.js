@@ -13,6 +13,10 @@ var hierarchy =
     [ "NATS.Client.IEncodedConnection", "interface_n_a_t_s_1_1_client_1_1_i_encoded_connection.html", [
       [ "NATS.Client.EncodedConnection", "class_n_a_t_s_1_1_client_1_1_encoded_connection.html", null ]
     ] ],
+    [ "NATS.Client.Rx.INATSObservable< out out T >", "interface_n_a_t_s_1_1_client_1_1_rx_1_1_i_n_a_t_s_observable.html", null ],
+    [ "NATS.Client.Rx.INATSObservable< T >", "interface_n_a_t_s_1_1_client_1_1_rx_1_1_i_n_a_t_s_observable.html", null ],
+    [ "NATS.Client.Rx.INATSObservable< TResult >", "interface_n_a_t_s_1_1_client_1_1_rx_1_1_i_n_a_t_s_observable.html", null ],
+    [ "NATS.Client.Rx.INATSObservable< TSrc >", "interface_n_a_t_s_1_1_client_1_1_rx_1_1_i_n_a_t_s_observable.html", null ],
     [ "NATS.Client.IStatistics", "interface_n_a_t_s_1_1_client_1_1_i_statistics.html", [
       [ "NATS.Client.Statistics", "class_n_a_t_s_1_1_client_1_1_statistics.html", null ]
     ] ],
@@ -46,7 +50,8 @@ var hierarchy =
       [ "NATS.Client.NATSSecureConnWantedException", "class_n_a_t_s_1_1_client_1_1_n_a_t_s_secure_conn_wanted_exception.html", null ],
       [ "NATS.Client.NATSSlowConsumerException", "class_n_a_t_s_1_1_client_1_1_n_a_t_s_slow_consumer_exception.html", null ],
       [ "NATS.Client.NATSStaleConnectionException", "class_n_a_t_s_1_1_client_1_1_n_a_t_s_stale_connection_exception.html", null ],
-      [ "NATS.Client.NATSTimeoutException", "class_n_a_t_s_1_1_client_1_1_n_a_t_s_timeout_exception.html", null ]
+      [ "NATS.Client.NATSTimeoutException", "class_n_a_t_s_1_1_client_1_1_n_a_t_s_timeout_exception.html", null ],
+      [ "NATS.Client.Rx.NATSRxException", "class_n_a_t_s_1_1_client_1_1_rx_1_1_n_a_t_s_rx_exception.html", null ]
     ] ],
     [ "NATS.Client.NkeyPair", "class_n_a_t_s_1_1_client_1_1_nkey_pair.html", null ],
     [ "NATS.Client.Nkeys", "class_n_a_t_s_1_1_client_1_1_nkeys.html", null ],
