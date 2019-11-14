@@ -80,6 +80,10 @@ namespace NATS.Client
         /// the current connection.</param>
         /// <param name="data">An array of type <see cref="Byte"/> that contains the data to publish
         /// to the connected NATS server.</param>
+        /// <exception cref="NATSReconnectBufferException"> is thrown when
+        /// publishing while reconnecting and the internal reconnect buffer
+        /// has been disabled or exceeded.</exception>
+        /// <seealso cref="Options.ReconnectBufferSize"></seealso>
         void Publish(string subject, byte[] data);
 
         /// <summary>
@@ -490,7 +494,7 @@ namespace NATS.Client
         /// <exception cref="NATSConnectionClosedException">The <see cref="Connection"/> is closed.</exception>
         /// <exception cref="NATSException">There was an unexpected exception performing an internal NATS call while executing the
         /// request. See <see cref="Exception.InnerException"/> for more details.</exception>
-        public void FlushBuffer();
+        void FlushBuffer();
 
         /// <summary>
         /// Closes the <see cref="IConnection"/> and all associated

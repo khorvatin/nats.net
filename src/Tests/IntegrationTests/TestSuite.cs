@@ -47,6 +47,8 @@ namespace IntegrationTests
         public const int SubscriptionsSuite = 11513; //1pc
         public const int TlsSuite = 11514; //3pc
         public const int RxSuite = 11517; //1pc
+        public const int AsyncAwaitDeadlocksSuite = 11518; //1pc
+        public const int ConnectionIpV6Suite = 11519; //1pc
     }
 
     public abstract class SuiteContext
@@ -91,7 +93,7 @@ namespace IntegrationTests
         public const string CollectionKey = "9733f463316047fa9207e0a3aaa3c41a";
 
         private const int SeedPortNormalServers = TestSeedPorts.DefaultSuiteNormalServers;
-        
+
         public readonly TestServerInfo DefaultServer = new TestServerInfo(Defaults.Port);
 
         public readonly TestServerInfo Server1 = new TestServerInfo(SeedPortNormalServers);
@@ -144,6 +146,13 @@ namespace IntegrationTests
         public readonly TestServerInfo Server1 = new TestServerInfo(SeedPort);
     }
 
+    public class ConnectionIpV6SuiteContext : SuiteContext
+    {
+        private const int SeedPort = TestSeedPorts.ConnectionIpV6Suite;
+
+        public readonly TestServerInfo Server1 = new TestServerInfo(SeedPort);
+    }
+
     public class ConnectionMemoryLeaksSuiteContext : SuiteContext
     {
         private const int SeedPort = TestSeedPorts.ConnectionMemoryLeaksSuite;
@@ -191,6 +200,13 @@ namespace IntegrationTests
         public string[] GetTestServersUrls() => TestServers.Select(s => s.Url).ToArray();
 
         public string[] GetTestServersShortListUrls() => TestServersShortList.Select(s => s.Url).ToArray();
+    }
+
+    public class AsyncAwaitDeadlocksSuiteContext : SuiteContext
+    {
+        private const int SeedPort = TestSeedPorts.AsyncAwaitDeadlocksSuite;
+
+        public readonly TestServerInfo Server1 = new TestServerInfo(SeedPort);
     }
 
     public class EncodingSuiteContext : SuiteContext

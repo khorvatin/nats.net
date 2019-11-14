@@ -24,6 +24,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Security.Authentication;
 using System.Globalization;
 using System.Diagnostics;
+using NATS.Client.Extensions;
 using NATS.Client.Internals;
 
 namespace NATS.Client
@@ -142,7 +143,7 @@ namespace NATS.Client
         private ConcurrentDictionary<Int64, Subscription> subs = 
             new ConcurrentDictionary<Int64, Subscription>();
         
-        private Queue<SingleUseChannel<bool>> pongs = new Queue<SingleUseChannel<bool>>();
+        private readonly ConcurrentQueue<SingleUseChannel<bool>> pongs = new ConcurrentQueue<SingleUseChannel<bool>>();
 
         internal MsgArg   msgArgs = new MsgArg();
 
@@ -170,9 +171,9 @@ namespace NATS.Client
             public InFlightRequest(CancellationToken token, int timeout)
             {
                 this.Waiter = new TaskCompletionSource<Msg>();
-                if (token != default(CancellationToken))
+                if (token != CancellationToken.None)
                 {
-                    token.Register(() => this.Waiter.TrySetCanceled());
+                    tokenCancelledRegistration = token.Register(() => this.Waiter.TrySetCanceled());
 
                     if (timeout > 0)
                     {
@@ -206,6 +207,7 @@ namespace NATS.Client
             public TaskCompletionSource<Msg> Waiter { get; private set; }
 
             private CancellationTokenRegistration tokenRegistration;
+            private CancellationTokenRegistration tokenCancelledRegistration;
             private CancellationTokenRegistration timeoutTokenRegistration;
             private readonly CancellationTokenSource linkedTokenSource;
             private readonly CancellationTokenSource tokenSource;
@@ -218,6 +220,7 @@ namespace NATS.Client
             public void Dispose()
             {
                 this.timeoutTokenRegistration.Dispose();
+                this.tokenCancelledRegistration.Dispose();
                 this.tokenRegistration.Dispose();
                 this.linkedTokenSource?.Dispose();
                 this.tokenSource?.Dispose();
@@ -439,7 +442,7 @@ namespace NATS.Client
                         sslStream = null;
                     }
 
-                    client = new TcpClient();
+                    client = createTcpClient(s.url);
                     var task = client.ConnectAsync(s.url.Host, s.url.Port);
                     // avoid raising TaskScheduler.UnobservedTaskException if the timeout occurs first
                     task.ContinueWith(t => GC.KeepAlive(t.Exception), TaskContinuationOptions.OnlyOnFaulted);
@@ -454,12 +457,21 @@ namespace NATS.Client
 
                     client.ReceiveBufferSize = Defaults.defaultBufSize*2;
                     client.SendBufferSize    = Defaults.defaultBufSize;
-
+                    
                     stream = client.GetStream();
 
                     // save off the hostname
                     hostName = s.url.Host;
                 }
+            }
+
+            private static TcpClient createTcpClient(Uri uri)
+            {
+                var interNetworkAddressFamily = uri.GetInterNetworkAddressFamily();
+
+                return interNetworkAddressFamily != null
+                       ? new TcpClient(interNetworkAddressFamily.Value)
+                       : new TcpClient();
             }
 
             private static bool remoteCertificateValidation(
@@ -476,14 +488,12 @@ namespace NATS.Client
 
             internal static void close(TcpClient c)
             {
-                if (c != null)
-                {
 #if NET45
-                    c.Close();
+                    c?.Close();
 #else
-                    c.Dispose();
+                    c?.Dispose();
 #endif
-                }
+                c = null;
             }
 
             internal void makeTLS(Options options)
@@ -511,6 +521,7 @@ namespace NATS.Client
                     sslStream = null;
 
                     close(client);
+                    client = null;
                     throw new NATSConnectionException("TLS Authentication error", ex);
                 }
             }
@@ -521,6 +532,22 @@ namespace NATS.Client
                 {
                     if (client != null)
                         client.SendTimeout = value;
+                }
+            }
+
+            internal int ReceiveTimeout
+            {
+                get
+                {
+                    if(client == null)
+                        throw new InvalidOperationException("Connection not properly initialized.");
+
+                    return client.ReceiveTimeout;
+                }
+                set
+                {
+                    if (client != null)
+                        client.ReceiveTimeout = value;
                 }
             }
 
@@ -611,7 +638,10 @@ namespace NATS.Client
                     if (stream != null)
                         stream.Dispose();
                     if (client != null)
+                    {
                         close(client);
+                        client = null;
+                    }
 
                     disposedValue = true;
                 }
@@ -764,7 +794,6 @@ namespace NATS.Client
         internal Connection(Options options)
         {
             opts = new Options(options);
-            pongs = createPongs();
 
             PING_P_BYTES = Encoding.UTF8.GetBytes(IC.pingProto);
             PING_P_BYTES_LEN = PING_P_BYTES.Length;
@@ -882,6 +911,7 @@ namespace NATS.Client
         private void makeTLSConn()
         {
             conn.makeTLS(this.opts);
+
             bw = conn.getWriteBufferedStream(Defaults.defaultBufSize);
             br = conn.getReadBufferedStream();
         }
@@ -892,7 +922,6 @@ namespace NATS.Client
         {
             // Kick old flusher forcefully.
             setFlusherDone(true);
-            kickFlusher();
 
             if (wg.Count > 0)
             {
@@ -916,9 +945,7 @@ namespace NATS.Client
                     return;
                 }
 
-                pout++;
-
-                if (pout > Opts.MaxPingsOut)
+                if (Interlocked.Increment(ref pout) > Opts.MaxPingsOut)
                 {
                     processOpError(new NATSStaleConnectionException());
                     return;
@@ -950,7 +977,7 @@ namespace NATS.Client
         // caller must lock
         private void startPingTimer()
         {
-            pout = 0;
+            Interlocked.Exchange(ref pout, 0);
 
             stopPingTimer();
 
@@ -1077,19 +1104,29 @@ namespace NATS.Client
             }
         }
 
-        private Queue<SingleUseChannel<bool>> createPongs()
-        {
-            return new Queue<SingleUseChannel<bool>>();
-        }
-
         // Process a connected connection and initialize properly.
         // Caller must lock.
         private void processConnectInit()
         {
             this.status = ConnState.CONNECTING;
 
-            processExpectedInfo();
-            sendConnect();
+            var orgTimeout = conn.ReceiveTimeout;
+
+            try
+            {
+                conn.ReceiveTimeout = opts.Timeout;
+                processExpectedInfo();
+                sendConnect();
+            }
+            catch (IOException ex)
+            {
+                throw new NATSConnectionException("Error while performing handshake with server. See inner exception for more details.", ex);
+            }
+            finally
+            {
+                if(conn.isSetup())
+                    conn.ReceiveTimeout = orgTimeout;
+            }
 
             // .NET vs go design difference here:
             // Starting the ping timer earlier allows us
@@ -1112,20 +1149,47 @@ namespace NATS.Client
             try
             {
                 exToThrow = null;
-                lock (mu)
+
+                NATSConnectionException natsAuthEx = null;
+
+                for(var i = 0; i < 6; i++) //Precaution to not end up in server returning ExTypeA, ExTypeB, ExTypeA etc.
                 {
-                    if (createConn(s))
+                    try
                     {
-                        processConnectInit();
-                        exToThrow = null;
-                        return true;
+                        lock (mu)
+                        {
+                            if (!createConn(s))
+                                return false;
+
+                            processConnectInit();
+                            exToThrow = null;
+
+                            return true;
+                        }
+                    }
+                    catch (NATSConnectionException ex)
+                    {
+                        if (!ex.IsAuthorizationViolationError() && !ex.IsAuthenticationExpiredError())
+                            throw;
+
+                        var aseh = opts.AsyncErrorEventHandler;
+                        if (aseh != null)
+                            callbackScheduler.Add(() => aseh(s, new ErrEventArgs(this, null, ex.Message)));
+
+                        if (natsAuthEx == null || !natsAuthEx.Message.Equals(ex.Message, StringComparison.OrdinalIgnoreCase))
+                        {
+                            natsAuthEx = ex;
+                            continue;
+                        }
+
+                        throw;
                     }
                 }
             }
-            catch (Exception e)
+            catch (Exception ex)
             {
-                exToThrow = e;
-                close(ConnState.DISCONNECTED, false);
+                exToThrow = ex;
+                close(ConnState.DISCONNECTED, false, ex);
                 lock (mu)
                 {
                     url = null;
@@ -1390,7 +1454,7 @@ namespace NATS.Client
                 else if (result.StartsWith(IC._ERR_OP_))
                 {
                     throw new NATSConnectionException(
-                        result.Substring(IC._ERR_OP_.Length));
+                        result.Substring(IC._ERR_OP_.Length).TrimStart(' '));
                 }
                 else
                 {
@@ -1487,14 +1551,14 @@ namespace NATS.Client
         // Schedules a connection event (connected/disconnected/reconnected)
         // if non-null.
         // Caller must lock.
-        private void scheduleConnEvent(EventHandler<ConnEventArgs> connEvent)
+        private void scheduleConnEvent(EventHandler<ConnEventArgs> connEvent, Exception error = null)
         {
             // Schedule a reference to the event handler.
             EventHandler<ConnEventArgs> eh = connEvent;
             if (eh != null)
             {
                 callbackScheduler.Add(
-                    () => { eh(this, new ConnEventArgs(this)); }
+                    () => { eh(this, new ConnEventArgs(this, error)); }
                 );
             }
         }
@@ -1515,128 +1579,154 @@ namespace NATS.Client
             // sent out, but are still in the pipe.
 
             // Hold manually release where needed below.
-            Monitor.Enter(mu);
 
-            // clear any queued pongs, e..g. pending flush calls.
-            clearPendingFlushCalls();
+            var lockWasTaken = false;
 
-            pending = new MemoryStream();
-            bw = new BufferedStream(pending);
-
-            // Clear any errors.
-            lastEx = null;
-
-            scheduleConnEvent(Opts.DisconnectedEventHandler);
-
-            // TODO:  Look at using a predicate delegate in the server pool to
-            // pass a method to, but locking is complex and would need to be
-            // reworked.
-            Srv cur;
-            while ((cur = srvPool.SelectNextServer(Opts.MaxReconnect)) != null)
+            try
             {
-                url = cur.url;
+                Monitor.Enter(mu, ref lockWasTaken);
 
+                // clear any queued pongs, e..g. pending flush calls.
+                clearPendingFlushCalls();
+
+                pending = new MemoryStream();
+
+                bw = new BufferedStream(pending);
+
+                //Keep ref to any error before clearing.
+                var errorForHandler = lastEx;
                 lastEx = null;
 
-                // Sleep appropriate amount of time before the
-                // connection attempt if connecting to same server
-                // we just got disconnected from.
-                double elapsedMillis = cur.TimeSinceLastAttempt.TotalMilliseconds;
-                double sleepTime = 0;
+                scheduleConnEvent(Opts.DisconnectedEventHandler, errorForHandler);
 
-                if (elapsedMillis < Opts.ReconnectWait)
+                // TODO:  Look at using a predicate delegate in the server pool to
+                // pass a method to, but locking is complex and would need to be
+                // reworked.
+                Srv cur;
+                while ((cur = srvPool.SelectNextServer(Opts.MaxReconnect)) != null)
                 {
-                    sleepTime = Opts.ReconnectWait - elapsedMillis;
-                }
+                    url = cur.url;
 
-                if (sleepTime <= 0)
-                {
-                    // Release to allow parallel processes to close,
-                    // unsub, etc.  Note:  Use the sleep API - yield is
-                    // heavy handed here.
-                    sleepTime = 50;
-                }
-
-                Monitor.Exit(mu);
-                sleep((int)sleepTime);
-                Monitor.Enter(mu);
-
-                if (isClosed())
-                    break;
-
-                cur.reconnects++;
-
-                try
-                {
-                    // try to create a new connection
-                    createConn(cur);
-                }
-                catch (Exception)
-                {
-                    // not yet connected, retry and hold
-                    // the lock.
                     lastEx = null;
-                    continue;
+
+                    // Sleep appropriate amount of time before the
+                    // connection attempt if connecting to same server
+                    // we just got disconnected from.
+                    double elapsedMillis = cur.TimeSinceLastAttempt.TotalMilliseconds;
+                    double sleepTime = 0;
+
+                    if (elapsedMillis < Opts.ReconnectWait)
+                    {
+                        sleepTime = Opts.ReconnectWait - elapsedMillis;
+                    }
+
+                    if (sleepTime <= 0)
+                    {
+                        // Release to allow parallel processes to close,
+                        // unsub, etc.  Note:  Use the sleep API - yield is
+                        // heavy handed here.
+                        sleepTime = 50;
+                    }
+
+                    if (lockWasTaken)
+                    {
+                        Monitor.Exit(mu);
+                        lockWasTaken = false;
+                    }
+
+                    sleep((int)sleepTime);
+                    
+                    Monitor.Enter(mu, ref lockWasTaken);
+
+                    if (isClosed())
+                        break;
+
+                    cur.reconnects++;
+
+                    try
+                    {
+                        // try to create a new connection
+                        if(!createConn(cur))
+                            continue;
+                    }
+                    catch (Exception)
+                    {
+                        // not yet connected, retry and hold
+                        // the lock.
+                        lastEx = null;
+                        continue;
+                    }
+
+                    // process our connect logic
+                    try
+                    {
+                        processConnectInit();
+                    }
+                    catch (Exception e)
+                    {
+                        lastEx = e;
+                        status = ConnState.RECONNECTING;
+                        continue;
+                    }
+
+                    try
+                    {
+                        // Send existing subscription state
+                        resendSubscriptions();
+
+                        // Now send off and clear pending buffer
+                        flushReconnectPendingItems();
+                    }
+                    catch (Exception)
+                    {
+                        status = ConnState.RECONNECTING;
+                        continue;
+                    }
+
+                    // We are reconnected.
+                    stats.reconnects++;
+                    cur.didConnect = true;
+                    cur.reconnects = 0;
+                    srvPool.CurrentServer = cur;
+                    status = ConnState.CONNECTED;
+
+                    scheduleConnEvent(Opts.ReconnectedEventHandler);
+
+                    // Release lock here, we will return below
+                    if (lockWasTaken)
+                    {
+                        Monitor.Exit(mu);
+                        lockWasTaken = false;
+                    }
+
+                    // Make sure to flush everything
+                    // We have a corner case where the server we just
+                    // connected to has failed as well - let the reader
+                    // thread detect this and spawn another reconnect 
+                    // thread to simplify locking.
+                    try
+                    {
+                        Flush();
+                    }
+                    catch
+                    {
+                        // ignored
+                    }
+
+                    return;
                 }
 
-                // process our connect logic
-                try
-                {
-                    processConnectInit();
-                }
-                catch (Exception e)
-                {
-                    lastEx = e;
-                    status = ConnState.RECONNECTING;
-                    continue;
-                }
+                // Call into close.. we have no more servers left..
+                if (lastEx == null)
+                    lastEx = new NATSNoServersException("Unable to reconnect");
 
-                try
-                {
-                    // Send existing subscription state
-                    resendSubscriptions();
-
-                    // Now send off and clear pending buffer
-                    flushReconnectPendingItems();
-                }
-                catch (Exception)
-                {
-                    status = ConnState.RECONNECTING;
-                    continue;
-                }
-
-                // We are reconnected.
-                stats.reconnects++;
-                cur.didConnect = true;
-                cur.reconnects = 0;
-                srvPool.CurrentServer = cur;
-                status = ConnState.CONNECTED;
-
-                scheduleConnEvent(Opts.ReconnectedEventHandler);
-
-                // Release lock here, we will return below
-                Monitor.Exit(mu);
-
-                // Make sure to flush everything
-                // We have a corner case where the server we just
-                // connected to has failed as well - let the reader
-                // thread detect this and spawn another reconnect 
-                // thread to simplify locking.
-                try
-                {
-                    Flush();
-                }
-                catch (Exception) { }
-
-                return;
+                Close();
             }
-
-            // Call into close.. we have no more servers left..
-            if (lastEx == null)
-                lastEx = new NATSNoServersException("Unable to reconnect");
-
-            Monitor.Exit(mu);
-            Close();
+            finally
+            {
+                if(lockWasTaken)
+                    Monitor.Exit(mu);
+            }
         }
 
         private bool isConnecting()
@@ -2212,20 +2302,11 @@ namespace NATS.Client
         // processPong is used to process responses to the client's ping
         // messages. We use pings for the flush mechanism as well.
         internal void processPong()
-        {
-            SingleUseChannel<bool> ch = null;
-            lock (mu)
-            {
-                if (pongs.Count > 0)
-                    ch = pongs.Dequeue();
+        { 
+            if (pongs.TryDequeue(out var ch))
+                ch?.add(true);
 
-                pout = 0;
-            }
-
-            if (ch != null)
-            {
-                ch.add(true);
-            }
+            Interlocked.Exchange(ref pout, 0);
         }
 
         // processOK is a placeholder for processing OK messages.
@@ -2319,7 +2400,7 @@ namespace NATS.Client
                     }
                 }
 
-                close(ConnState.CLOSED, invokeDelegates);
+                close(ConnState.CLOSED, invokeDelegates, ex);
             }
         }
 
@@ -2411,6 +2492,27 @@ namespace NATS.Client
 
                 // write our pubProtoBuf buffer to the buffered writer.
                 int pubProtoLen = writePublishProto(pubProtoBuf, subject, reply, count);
+
+                // Check if we are reconnecting, and if so check if
+                // we have exceeded our reconnect outbound buffer limits.
+                // Don't use IsReconnecting to avoid locking.
+                if (status == ConnState.RECONNECTING)
+                {
+                    int rbsize = opts.ReconnectBufferSize;
+                    if (rbsize != 0)
+                    {
+                        if (rbsize == -1)
+                            throw new NATSReconnectBufferException("Reconnect buffering has been disabled.");
+
+                        if (flushBuffer)
+                            bw.Flush();
+                        else
+                            kickFlusher();
+
+                        if (bw.Position + count + pubProtoLen > rbsize)
+                            throw new NATSReconnectBufferException("Reconnect buffer exceeded.");
+                    }
+                }
 
                 bw.Write(pubProtoBuf, 0, pubProtoLen);
 
@@ -3186,9 +3288,11 @@ namespace NATS.Client
         /// <returns>A unique inbox string.</returns>
         public string NewInbox()
         {
+            var prefix = opts.CustomInboxPrefix ?? IC.inboxPrefix;
+
             if (!opts.UseOldRequestStyle)
             {
-                return IC.inboxPrefix + Guid.NewGuid().ToString("N");
+                return prefix + Guid.NewGuid().ToString("N");
             }
             else
             {
@@ -3199,7 +3303,7 @@ namespace NATS.Client
 
                 r.NextBytes(buf);
 
-                return IC.inboxPrefix + BitConverter.ToString(buf).Replace("-","");
+                return prefix + BitConverter.ToString(buf).Replace("-","");
             }
         }
 
@@ -3511,14 +3615,10 @@ namespace NATS.Client
         // call outstanding and we call close.
         private bool removeFlushEntry(SingleUseChannel<bool> chan)
         {
-            if (pongs == null)
+            if (!pongs.TryDequeue(out var start))
                 return false;
 
-            if (pongs.Count == 0)
-                return false;
-
-            SingleUseChannel<bool> start = pongs.Dequeue();
-            SingleUseChannel<bool> c = start;
+            var c = start;
 
             while (true)
             {
@@ -3527,12 +3627,11 @@ namespace NATS.Client
                     SingleUseChannel<bool>.Return(c);
                     return true;
                 }
-                else
-                {
-                    pongs.Enqueue(c);
-                }
 
-                c = pongs.Dequeue();
+                pongs.Enqueue(c);
+
+                if (!pongs.TryDequeue(out c))
+                    return false;
 
                 if (c == start)
                     break;
@@ -3669,14 +3768,8 @@ namespace NATS.Client
         // Lock must be held by the caller.
         private void clearPendingFlushCalls()
         {
-
-            // Clear any queued pongs, e.g. pending flush calls.
-            foreach (SingleUseChannel<bool> ch in pongs)
-            {
-                if (ch != null)
-                    ch.add(true);
-            }
-            pongs.Clear();
+            while(pongs.TryDequeue(out var ch))
+                ch?.add(true);
         }
 
 
@@ -3697,7 +3790,7 @@ namespace NATS.Client
         // desired status. Also controls whether user defined callbacks
         // will be triggered. The lock should not be held entering this
         // function. This function will handle the locking manually.
-        private void close(ConnState closeState, bool invokeDelegates)
+        private void close(ConnState closeState, bool invokeDelegates, Exception error = null)
         {
             lock (mu)
             {
@@ -3739,7 +3832,7 @@ namespace NATS.Client
                 // disconnect;
                 if (invokeDelegates && conn.isSetup())
                 {
-                    scheduleConnEvent(Opts.DisconnectedEventHandler);
+                    scheduleConnEvent(Opts.DisconnectedEventHandler, error);
                 }
 
                 // Go ahead and make sure we have flushed the outbound buffer.
@@ -3758,7 +3851,30 @@ namespace NATS.Client
                         {
                             bw.Dispose();
                         }
-                        catch (Exception) { /* ignore */ }
+                        catch (Exception)
+                        {
+                            /* ignore */
+                        }
+                        finally
+                        {
+                            bw = null;
+                        }
+                    }
+
+                    if (br != null)
+                    {
+                        try
+                        {
+                            br.Dispose();
+                        }
+                        catch
+                        {
+                            // ignored
+                        }
+                        finally
+                        {
+                            br = null;
+                        }
                     }
 
                     conn.teardown();
@@ -3766,7 +3882,7 @@ namespace NATS.Client
 
                 if (invokeDelegates)
                 {
-                    scheduleConnEvent(opts.ClosedEventHandler);
+                    scheduleConnEvent(opts.ClosedEventHandler, error);
                 }
 
                 status = closeState;
@@ -3781,7 +3897,7 @@ namespace NATS.Client
         /// <seealso cref="State"/>
         public void Close()
         {
-            close(ConnState.CLOSED, true);
+            close(ConnState.CLOSED, true, lastEx);
             callbackScheduler.ScheduleStop();
             disableSubChannelPooling();
         }

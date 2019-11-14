@@ -12,6 +12,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Concurrent;
 using NATS.Client;
 using System.Threading;
 using Xunit;
@@ -95,6 +96,88 @@ namespace IntegrationTests
                 }
                 Assert.True(disconnected);
             }
+        }
+
+        [Fact]
+        public void TestErrorHandlerWhenNotAllowingReconnectErrorShouldBeProvided()
+        {
+            var closedEv = new AutoResetEvent(false);
+            var disconEv = new AutoResetEvent(false);
+            var opts = Context.GetTestOptions(Context.Server1.Port);
+            var errors = new ConcurrentQueue<Exception>();
+            opts.AllowReconnect = false;
+            opts.ClosedEventHandler = (sender, args) =>
+            {
+                if(args.Error != null)
+                    errors.Enqueue(args.Error);
+
+                closedEv.Set();
+            };
+            opts.DisconnectedEventHandler = (sender, args) =>
+            {
+                if(args.Error != null)
+                    errors.Enqueue(args.Error);
+
+                disconEv.Set();
+            };
+
+            using (var s = NATSServer.CreateFastAndVerify(Context.Server1.Port))
+            {
+                using (var cn = Context.ConnectionFactory.CreateConnection(opts))
+                {
+                    s.Bounce(1000);
+                }
+            }
+
+            Assert.True(closedEv.WaitOne(1000));
+            Assert.True(disconEv.WaitOne(1000));
+            Assert.Equal(2, errors.Count);
+        }
+
+        [Fact]
+        public void TestErrorHandlerWhenAllowingReconnectErrorShouldNotBeProvided()
+        {
+            var closedEv = new AutoResetEvent(false);
+            var disconEv = new AutoResetEvent(false);
+            var reconEv = new AutoResetEvent(false);
+            var opts = Context.GetTestOptions(Context.Server1.Port);
+            var errors = new ConcurrentQueue<Exception>();
+            opts.AllowReconnect = true;
+            opts.MaxReconnect = 1;
+            opts.ClosedEventHandler = (sender, args) =>
+            {
+                if(args.Error != null)
+                    errors.Enqueue(args.Error);
+
+                closedEv.Set();
+            };
+            opts.DisconnectedEventHandler = (sender, args) =>
+            {
+                if(args.Error != null)
+                    errors.Enqueue(args.Error);
+
+                disconEv.Set();
+            };
+            opts.ReconnectedEventHandler = (sender, args) =>
+            {
+                if(args.Error != null)
+                    errors.Enqueue(args.Error);
+
+                reconEv.Set();
+            };
+
+            using (var s = NATSServer.CreateFastAndVerify(Context.Server1.Port))
+            {
+                using (var cn = Context.ConnectionFactory.CreateConnection(opts))
+                {
+                    s.Bounce(1000);
+                    Assert.True(reconEv.WaitOne(1000));
+                }
+            }
+
+            Assert.True(closedEv.WaitOne(1000));
+            Assert.True(disconEv.WaitOne(1000));
+            Assert.Empty(errors);
         }
 
         [Fact]
@@ -453,9 +536,23 @@ namespace IntegrationTests
             }
         }
 
+        [Fact]
+        public void CanConnectWhenHandshakeTimeoutIsSpecified()
+        {
+            var opts = Context.GetTestOptionsWithDefaultTimeout(Context.Server1.Port);
+            opts.AllowReconnect = false;
+            opts.Timeout = 500;
+
+            using (var s = NATSServer.CreateFastAndVerify(Context.Server1.Port))
+            {
+                using (var cn = Context.ConnectionFactory.CreateConnection(opts))
+                {
+                    Assert.False(cn.IsClosed());
+                }
+            }
+        }
+
         /// NOT IMPLEMENTED:
-        /// TestServerSecureConnections
-        /// TestErrOnConnectAndDeadlock
         /// TestErrOnMaxPayloadLimit
     }
 
@@ -1159,5 +1256,23 @@ namespace IntegrationTests
             }
         }
 #endif
+    }
+
+    public class TestIpV6Connection : TestSuite<ConnectionIpV6SuiteContext>
+    {
+        public TestIpV6Connection(ConnectionIpV6SuiteContext context) : base(context) { }
+
+        [Fact]
+        public void CanConnectUsingIpV6()
+        {
+            var opts = Context.GetTestOptions(Context.Server1.Port);
+            opts.Url = $"nats://[::1]:{Context.Server1.Port}";
+
+            using (NATSServer.CreateFastAndVerify(Context.Server1.Port))
+            {
+                using (var cn = Context.ConnectionFactory.CreateConnection(opts))
+                    Assert.True(cn.State == ConnState.CONNECTED, $"Failed to connect. Expected '{ConnState.CONNECTED}' got '{cn.State}'");
+            }
+        }
     }
 }
